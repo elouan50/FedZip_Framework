@@ -5,7 +5,7 @@ import tensorflow_datasets as tfds
 import tensorflow_federated as tff
 
 from config import *
-from tensorflow.keras.utils import to_categorical
+from tensorflow.python.keras.utils.np_utils import to_categorical
 from tensorflow import reshape, nest, config
 
 
@@ -16,9 +16,9 @@ def build_train_tff_data():
                                                as_supervised=True,
                                                ))
     shape = x_train[1].shape
-
+    
     if input_shape != shape:
-        x_train = tf.image.resize_with_pad(x_train, input_shape[1], input_shape[2]).numpy()
+        x_train = np.array([resize_with_pad(img, input_shape[1], input_shape[2]) for img in x_train])
 
     x_train = x_train.reshape(input_shape)
     y_train = to_categorical(y_train, NumClass)
@@ -73,6 +73,16 @@ def build_train_tff_data():
 
     return federated_train_data, preprocessed_sample_dataset
 
+def resize_with_pad(image, target_height, target_width):
+    h, w = image.shape[:2]
+    pad_h = max(target_height - h, 0)
+    pad_w = max(target_width - w, 0)
+    pad_top = pad_h // 2
+    pad_bottom = pad_h - pad_top
+    pad_left = pad_w // 2
+    pad_right = pad_w - pad_left
+    return np.pad(image, ((pad_top, pad_bottom), (pad_left, pad_right), (0, 0)), mode='constant', constant_values=0)
+
 
 def build_test_data():
     x_test, y_test = tfds.as_numpy(tfds.load(name_dt,
@@ -84,7 +94,7 @@ def build_test_data():
     shape = x_test[1].shape
 
     if input_shape != shape:
-        x_test = tf.image.resize_with_pad(x_test, input_shape[1], input_shape[2]).numpy()
+        x_test = np.array([resize_with_pad(img, input_shape[1], input_shape[2]) for img in x_test])
 
     x_test = x_test.reshape(input_shape)
     y_test = to_categorical(y_test, NumClass)

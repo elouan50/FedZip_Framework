@@ -24,6 +24,7 @@ Communication-Efficient Learning of Deep Networks from Decentralized Data
 import collections
 from typing import Callable, Optional
 import warnings
+from config import *
 
 import tensorflow as tf
 import deploy as ds
@@ -33,23 +34,23 @@ import deploy as ds
 
 from tensorflow_federated.python.aggregators import factory
 from tensorflow_federated.python.common_libs import py_typecheck
-from tensorflow_federated.python.core.api import computations
+from tensorflow_federated.python.core.environments.tensorflow_frontend import tensorflow_computation
 from tensorflow_federated.python.core.templates import iterative_process
 from tensorflow_federated.python.core.templates import measured_process
 from tensorflow_federated.python.learning import client_weight_lib
-from tensorflow_federated.python.learning import model as model_lib
-from tensorflow_federated.python.learning import model_utils
-from tensorflow_federated.python.learning.framework import dataset_reduce
-from tensorflow_federated.python.learning.framework import optimizer_utils
-from tensorflow_federated.python.tensorflow_libs import tensor_utils
+from tensorflow_federated.python.learning import models
+from tensorflow_federated.python.learning import loop_builder
+from tensorflow_federated.python.learning import algorithms
+from tensorflow_federated.python.learning import optimizers
+from tensorflow_federated.python.learning import templates
 
 
-class ClientFedAvg(optimizer_utils.ClientDeltaFn):
+class ClientFedAvg(templates.ClientWorkProcess):
   """Client TensorFlow logic for Federated Averaging."""
 
   def __init__(
       self,
-      model: model_lib.Model,
+      model_fn,
       optimizer: tf.keras.optimizers.Optimizer,
       client_weighting: client_weight_lib.ClientWeightType = client_weight_lib
       .ClientWeighting.NUM_EXAMPLES,
@@ -70,14 +71,16 @@ class ClientFedAvg(optimizer_utils.ClientDeltaFn):
       use_experimental_simulation_loop: Controls the reduce loop function for
         input dataset. An experimental reduce loop is used for simulation.
     """
-    py_typecheck.check_type(model, model_lib.Model)
-    self._model = model_utils.enhance(model)
+    py_typecheck.check_type(model_fn, models.VariableModel)
+    self._model = models.from_keras_model(keras_model=model_fn,
+                                          input_spec=input,
+                                          loss=tf.keras.losses.SparseCategoricalCrossentropy())
     self._optimizer = optimizer
-    py_typecheck.check_type(self._model, model_utils.EnhancedModel)
+    py_typecheck.check_type(self._model, models.VariableModel)
     client_weight_lib.check_is_client_weighting_or_callable(client_weighting)
     self._client_weighting = client_weighting
 
-    self._dataset_reduce_fn = dataset_reduce.build_dataset_reduce_fn(
+    self._dataset_reduce_fn = loop_builder.build_dataset_reduce_fn(
         use_experimental_simulation_loop)
 
   @property
@@ -116,8 +119,7 @@ class ClientFedAvg(optimizer_utils.ClientDeltaFn):
 
     # TODO(b/122071074): Consider moving this functionality into
     # tff.federated_mean?
-    weights_delta, has_non_finite_delta = (
-        tensor_utils.zero_all_if_any_non_finite(weights_delta))
+    weights_delta, has_non_finite_delta = (zero_all_if_any_non_finite(weights_delta))
     # Zero out the weight if there are any non-finite values.
     if has_non_finite_delta > 0:
       # TODO(b/176171842): Zeroing has no effect with unweighted aggregation.
@@ -143,9 +145,21 @@ class ClientFedAvg(optimizer_utils.ClientDeltaFn):
     ds.huffman_encoding_difference_table(weights_delta)
 
 
-    return optimizer_utils.ClientOutput(weights_delta, weights_delta_weight,
+    return templates.ClientOutput(weights_delta, weights_delta_weight,
                                         model_output, optimizer_output)
 
+def zero_all_if_any_non_finite(weights_delta):
+  # Check if any element is non-finite (NaN or Inf)
+  has_non_finite_delta = tf.reduce_any(tf.math.logical_not(tf.math.is_finite(weights_delta)))
+  
+  # Zero out all elements if non-finite values are found
+  weights_delta = tf.cond(
+    has_non_finite_delta,
+    lambda: tf.zeros_like(weights_delta),
+    lambda: weights_delta
+  )
+  
+  return weights_delta, has_non_finite_delta
 
 DEFAULT_SERVER_OPTIMIZER_FN = lambda: tf.keras.optimizers.SGD(learning_rate=1.0)
 
@@ -153,7 +167,7 @@ DEFAULT_SERVER_OPTIMIZER_FN = lambda: tf.keras.optimizers.SGD(learning_rate=1.0)
 # TODO(b/170208719): Remove `aggregation_process` after migration to
 # `model_update_aggregation_factory`.
 def build_federated_averaging_process(
-    model_fn: Callable[[], model_lib.Model],
+    model_fn: Callable[[], models.VariableModel],
     client_optimizer_fn: Callable[[], tf.keras.optimizers.Optimizer],
     server_optimizer_fn: Callable[
         [], tf.keras.optimizers.Optimizer] = DEFAULT_SERVER_OPTIMIZER_FN,
@@ -274,23 +288,26 @@ def build_federated_averaging_process(
         'tutorials for details of use of tff.aggregators module.',
         DeprecationWarning)
 
-  def client_fed_avg(model_fn: Callable[[], model_lib.Model]) -> ClientFedAvg:
+  def client_fed_avg(model_fn: Callable[[], models.VariableModel]) -> ClientFedAvg:
     return ClientFedAvg(model_fn(), client_optimizer_fn(), client_weighting,
                         use_experimental_simulation_loop)
 
-  iter_proc = optimizer_utils.build_model_delta_optimizer_process(
-      model_fn,
-      model_to_client_delta_fn=client_fed_avg,
-      server_optimizer_fn=server_optimizer_fn,
-      broadcast_process=broadcast_process,
-      aggregation_process=aggregation_process,
-      model_update_aggregation_factory=model_update_aggregation_factory)
+  def client_optimizer_fn(client_lr):
+        return optimizers.build_sgdm(client_lr)
+
+  iter_proc = algorithms.build_weighted_fed_avg_with_optimizer_schedule(
+    model_fn=model_fn,
+    client_optimizer_fn=client_optimizer_fn,
+    # server_optimizer_fn=server_optimizer_fn,
+    client_learning_rate_fn=lambda lr: client_lr,
+    model_aggregator=aggregation_process
+  )
 
   server_state_type = iter_proc.state_type.member
 
-  @computations.tf_computation(server_state_type)
+  # @tensorflow_computation.tf_computation(server_state_type)
   def get_model_weights(server_state):
     return server_state.model
 
-  iter_proc.get_model_weights = get_model_weights
+  # iter_proc.get_model_weights = get_model_weights
   return iter_proc

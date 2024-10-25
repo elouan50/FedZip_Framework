@@ -9,7 +9,7 @@ from utils import plot_graph
 from datetime import datetime
 from dataset import load_dataset
 from matplotlib import pyplot as plt
-from tensorflow.keras import losses, metrics, optimizers
+from keras.src import losses, metrics, optimizers
 
 now = datetime.now()
 date_time = now.strftime("%d.%m.%Y__%H.%M.%S")
@@ -33,7 +33,7 @@ def model_fn():
     # scope. TFF will call this within different graph contexts.
 
     keras_model = dnn.keras_model(model_name)
-    return tff.learning.from_keras_model(
+    return tff.learning.models.from_keras_model(
         keras_model,
         input_spec=preprocessed_sample_dataset.element_spec,
         loss=losses.CategoricalCrossentropy(),

@@ -2,12 +2,10 @@ import tensorflow as tf
 import numpy as np
 import sys
 
-from tensorflow_federated.python.learning import model_utils
-
 # tf.compat.v1.enable_eager_execution()
 # tf.config.experimental_run_functions_eagerly(True)
 
-train_dir = '/Users/amir/Documents/CODE/Python/FL/log'
+train_dir = 'log'
 
 #
 def bitsize(tensor, s):
